@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 보안: connect-src 'none' → fetch/XHR/WebSocket 전송 차단. CSV가 서버로 나갈 수 없는 구조입니다. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src https: data: blob:; worker-src blob:; connect-src 'none'">
+<title>상가업소 검색 지도</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+:root{--ink:#1f2933;--sub:#616e7c;--line:#d9dee4;--bg:#f5f7f9;--acc:#0b7285;--mk:#e8590c}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:'Noto Sans KR','Malgun Gothic',-apple-system,'Apple SD Gothic Neo',sans-serif;color:var(--ink);font-size:14px}
+#app{display:flex;height:100dvh}
+#side{width:390px;flex:none;display:flex;flex-direction:column;background:#fff;border-right:1px solid var(--line);min-height:0}
+#map{flex:1;min-width:0;background:#e8edf0}
+.blk{padding:10px 14px;border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0;padding:12px 14px 0}
+#drop{display:block;border:2px dashed #aab4be;border-radius:10px;padding:14px;text-align:center;color:var(--sub);cursor:pointer;background:var(--bg)}
+#drop.over{border-color:var(--acc);background:#e3f4f7;color:var(--acc)}
+#drop b{color:var(--ink)}
+#drop input{display:none}
+#q{width:100%;padding:10px 12px;border:1px solid #aab4be;border-radius:8px;font-size:15px}
+#q:disabled{background:var(--bg)}
+#q:focus-visible,#drop:focus-visible,button:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.row label{font-size:12px;color:var(--sub)}
+select,button{font:inherit;font-size:13px;padding:5px 8px;border:1px solid #aab4be;border-radius:6px;background:#fff;color:var(--ink)}
+button{cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}
+#stat{font-size:12px;color:var(--sub);padding:6px 14px;border-bottom:1px solid var(--line);background:var(--bg)}
+#stat b{color:var(--ink)}
+#list{list-style:none;margin:0;padding:0;overflow:auto;flex:1;min-height:0}
+#list li{padding:9px 14px;border-bottom:1px solid #eef1f4;cursor:pointer}
+#list li:hover{background:#eef6f8}
+#list .nm{font-weight:700}#list .br{color:var(--acc);font-weight:700;margin-left:4px}
+#list .ad{font-size:12px;color:var(--sub);margin-top:2px}
+#list .nc{font-size:11px;color:#c92a2a;margin-left:6px}
+#list .empty{cursor:default;color:var(--sub);text-align:center;padding:28px 14px;line-height:1.6}
+#list .empty:hover{background:none}
+#list .more{text-align:center;color:var(--acc);font-weight:600}
+details{padding:8px 14px;border-bottom:1px solid var(--line);font-size:12.5px;line-height:1.6;color:#3e4c59}
+summary{cursor:pointer;font-weight:600;color:var(--ink)}
+details h4{margin:10px 0 2px;font-size:12.5px}details ul{margin:0;padding-left:18px}
+#toasts{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:2000;display:flex;flex-direction:column;gap:6px;width:min(92vw,440px);pointer-events:none}
+.t{pointer-events:auto;padding:9px 12px;border-radius:8px;font-size:13px;line-height:1.45;color:#fff;box-shadow:0 3px 12px rgba(0,0,0,.25);display:flex;justify-content:space-between;gap:10px}
+.t.error{background:#c92a2a}.t.warn{background:#d9480f}.t.info{background:#1971c2}
+.t button{background:none;border:0;color:#fff;font-size:16px;padding:0 2px;line-height:1}
+.pl{max-height:230px;overflow:auto}
+.pi+.pi{border-top:1px solid #e5e8eb;margin-top:8px;padding-top:8px}
+.pn{font-size:17px;font-weight:700;line-height:1.3}.pn .pb{color:var(--mk);margin-left:4px}
+.pa{font-size:12px;color:#555;margin-top:4px}
+@media(max-width:760px){
+ #app{flex-direction:column}
+ #map{order:-1;flex:none;height:42dvh}
+ #side{width:100%;flex:1;border-right:0}
+ h1{display:none}
+}
+</style>
+</head>
+<body>
+<div id="app">
+ <aside id="side">
+  <h1>상가업소 검색 지도</h1>
+  <div class="blk">
+   <label id="drop" tabindex="0">
+    <input type="file" id="file" accept=".csv,text/csv">
+    <b>CSV 파일 선택</b> 또는 여기로 끌어다 놓기<br><span style="font-size:12px">필수 컬럼: 상호명, 지점명, 경도, 위도, 도로명</span>
+   </label>
+   <div style="margin-top:10px"><input id="q" type="search" placeholder="상호명 · 지점명 · 도로명 검색 (공백으로 여러 단어)" disabled autocomplete="off"></div>
+   <div class="row">
+    <label>배경지도 <select id="base"></select></label>
+    <label>마커 크기 <input id="size" type="range" min="4" max="14" value="7" style="width:90px;vertical-align:middle"></label>
+   </div>
+   <div class="row">
+    <button id="dlGeo" disabled>GeoJSON 저장</button>
+    <button id="dlCsv" disabled>CSV 저장</button>
+   </div>
+  </div>
+  <div id="stat">CSV 파일을 불러와 주세요.</div>
+  <ul id="list"><li class="empty">CSV 파일을 불러오면 검색할 수 있습니다.</li></ul>
+  <details>
+   <summary>이 페이지는 어떻게 만들었나요?</summary>
+   <h4>서버 없는 정적 웹페이지로 만든 이유</h4>
+   <ul>
+    <li>HTML 파일 하나에 모든 처리 코드가 들어 있어 서버·DB 없이 동작하고, 정적 호스팅(GitHub Pages 등)에 올려도 됩니다.</li>
+    <li>CSV 읽기와 검색을 전부 브라우저가 하므로 파일이 외부로 전송되지 않습니다. 보안 정책(CSP)으로 네트워크 전송 자체를 차단해 두었습니다. 지도 타일 요청에는 화면 위치(타일 번호)만 포함되고 CSV 내용은 포함되지 않습니다.</li>
+   </ul>
+   <h4>지도 라이브러리와 베이스맵의 차이</h4>
+   <ul>
+    <li>라이브러리(Leaflet): 지도 화면과 확대/축소, 마커를 다루는 프로그램입니다.</li>
+    <li>베이스맵(타일): 배경이 되는 지도 이미지 조각입니다. OSM, CARTO, Esri 등이 무료로 공개합니다.</li>
+    <li>Leaflet이 고른 베이스맵 타일을 불러오고 그 위에 검색된 업소를 그립니다. 일부 타일 서버가 막혀도 자동으로 Esri 도로 지도로 전환합니다.</li>
+   </ul>
+   <h4>대용량 CSV 성능</h4>
+   <ul>
+    <li>파일 해석은 백그라운드 스레드(Web Worker)에서 조각 단위로 처리하고, 필요한 값만 메모리에 보관합니다.</li>
+    <li>마커는 개별 객체를 만들지 않고 캔버스 한 장에 직접 그립니다. 화면에 보이는 업소가 많으면 격자로 묶어 개수만 표시하고, 누르면 확대됩니다.</li>
+    <li>검색은 입력 후 0.25초 뒤에 실행하며, 목록은 200건씩 나눠 보여줍니다.</li>
+   </ul>
+   <h4>마커 설정을 크기만 둔 이유</h4>
+   <ul>
+    <li>업소 수에 따라 작게/크게 보고 싶은 수요가 실제로 있어 크기 조절은 넣었습니다.</li>
+    <li>종류(모양·아이콘) 선택은 업종 구분 같은 의미가 없으면 정보가 늘지 않고, 대량 렌더링 성능과 모바일 화면 복잡도만 늘어 뺐습니다.</li>
+   </ul>
+  </details>
+ </aside>
+ <div id="map"></div>
+</div>
+<div id="toasts"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const SEP = '\u0001';
+const REQ = {
+  '상호명': ['상호명'],
+  '지점명': ['지점명'],
+  '경도': ['경도', 'lon', 'lng', 'longitude'],
+  '위도': ['위도', 'lat', 'latitude'],
+  '도로명': ['도로명', '도로명주소', '도로명 주소']
+};
+const STEP = 200, LIM = 3000;
+const FORMAT_ERR = '파일 형식이 달라 값을 제공할 수 없습니다. 쉼표(,)로 구분된 CSV 파일을 선택해 주세요.';
+const mer = la => Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360));
+
+/* 데이터는 필요한 값만 배열/타입배열로 보관 (객체 수십만 개를 만들지 않음) */
+let nm = [], br = [], rd = [], sk = [], ob = [];
+let LAT = new Float64Array(0), LON = LAT, MY = LAT;
+let FIELDS = [], FILE = '', RES = new Int32Array(0), shown = STEP, RAD = 7, timer = 0, seq = 0, busy = false;
+
+/* ---------- 알림(상단 작은 창) ---------- */
+function toast(msg, type, ms) {
+  const el = document.createElement('div');
+  el.className = 't ' + (type || 'info');
+  el.innerHTML = '<span>' + esc(msg) + '</span><button aria-label="닫기">×</button>';
+  const rm = () => el.remove();
+  el.querySelector('button').onclick = rm;
+  $('#toasts').appendChild(el);
+  setTimeout(rm, ms || 7000);
+}
+function setStat(h) { $('#stat').innerHTML = h; }
+
+/* ---------- 지도 + 배경지도 ---------- */
+const map = L.map('map').setView([36.5, 127.8], 7);
+const tl = (u, o) => L.tileLayer(u, Object.assign({ maxZoom: 19 }, o));
+const BASES = {
+  '일반 지도 (OpenStreetMap)': tl('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }),
+  '밝은 단순 지도 (CARTO)': tl('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', attribution: '© OpenStreetMap contributors © CARTO' }),
+  '위성 사진 (Esri)': tl('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' })
+};
+/* 예비 지도: 선택한 배경지도 타일이 전부 막히면 자동 전환 */
+const FALLBACK = tl('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' });
+
+const sel = $('#base');
+Object.keys(BASES).forEach(k => sel.add(new Option(k, k)));
+sel.selectedIndex = 1;   // 기본: 가볍고 밝은 CARTO
+
+let cur = null, loaded = 0, errs = 0, usedFb = false;
+Object.values(BASES).concat([FALLBACK]).forEach(l => {
+  l.on('tileload', () => { loaded++; });
+  l.on('tileerror', () => {
+    errs++;
+    if (l !== FALLBACK && !usedFb && loaded === 0 && errs >= 4) {
+      usedFb = true;
+      toast('선택한 배경지도를 불러오지 못해 Esri 도로 지도로 자동 전환했습니다. (일부 지도 서버는 file:// 로 열면 차단됩니다. http://localhost 로 열어 보세요.)', 'warn', 10000);
+      setBase(FALLBACK);
+    }
+  });
+});
+function setBase(l) {
+  if (cur) map.removeLayer(cur);
+  cur = l; l.addTo(map); l.bringToBack();
+}
+sel.onchange = () => { loaded = 0; errs = 0; usedFb = false; setBase(BASES[sel.value]); };
+setBase(BASES[sel.value]);
+
+/* ---------- 마커 레이어: 캔버스 한 장에 직접 그림 (대용량 대응) ---------- */
+function popupHtml(list) {
+  let h = '<div class="pl">';
+  const n = Math.min(list.length, 8);
+  for (let k = 0; k < n; k++) {
+    const i = list[k];
+    h += '<div class="pi"><div class="pn">' + esc(nm[i]) + (br[i] ? '<span class="pb">' + esc(br[i]) + '</span>' : '') +
+         '</div><div class="pa">' + esc(rd[i]) + '</div></div>';
+  }
+  if (list.length > n) h += '<div class="pa" style="margin-top:8px">같은 위치에 ' + (list.length - n) + '곳 더 있습니다.</div>';
+  return h + '</div>';
+}
+function showPopup(list, la, lo) { L.popup({ maxWidth: 300 }).setLatLng([la, lo]).setContent(popupHtml(list)).openOn(map); }
+
+const PtLayer = L.Layer.extend({
+  idx: new Int32Array(0), pts: [], bins: [],
+  onAdd(m) {
+    this._m = m;
+    const c = this._c = L.DomUtil.create('canvas', 'leaflet-zoom-hide');
+    c.style.position = 'absolute'; c.style.pointerEvents = 'none';
+    m.getPane('overlayPane').appendChild(c);
+    m.on('moveend resize', this.redraw, this);
+    m.on('click', this._click, this);
+    m.on('mousemove', this._hover, this);
+    this.redraw();
+  },
+  onRemove(m) {
+    L.DomUtil.remove(this._c);
+    m.off('moveend resize', this.redraw, this); m.off('click', this._click, this); m.off('mousemove', this._hover, this);
+  },
+  setData(idx) { this.idx = idx; this.redraw(); },
+  redraw() {
+    const m = this._m; if (!m) return;
+    const sz = m.getSize(), w = sz.x, h = sz.y, dpr = window.devicePixelRatio || 1, c = this._c;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+      c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+      c.style.width = w + 'px'; c.style.height = h + 'px';
+    }
+    L.DomUtil.setPosition(c, m.containerPointToLayerPoint([0, 0]));
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+
+    const b = m.getBounds(), W = b.getWest(), E = b.getEast(), S = b.getSouth(), N = b.getNorth();
+    const yT = mer(N), sx = w / (E - W), sy = h / (yT - mer(S));
+    const idx = this.idx, n = idx.length;
+    let vis = 0; const keep = [];
+    for (let k = 0; k < n; k++) {
+      const i = idx[k], lo = LON[i], la = LAT[i];
+      if (lo < W || lo > E || la < S || la > N) continue;
+      if (++vis <= LIM) keep.push(i);
+    }
+    this.pts = []; this.bins = [];
+    const dot = (x, y, i) => {
+      g.beginPath(); g.arc(x, y, RAD, 0, 6.2832);
+      g.fillStyle = 'rgba(232,89,12,.93)'; g.fill();
+      g.lineWidth = 1.5; g.strokeStyle = '#fff'; g.stroke();
+      this.pts.push({ x, y, i });
+    };
+    if (vis <= LIM) {
+      for (const i of keep) dot((LON[i] - W) * sx, (yT - MY[i]) * sy, i);
+      return;
+    }
+    /* 화면에 보이는 업소가 많으면 격자로 묶어서 개수만 표시 */
+    const cell = 44, cols = Math.ceil(w / cell), rows = Math.ceil(h / cell), z = cols * rows;
+    const cnt = new Uint32Array(z), sxs = new Float64Array(z), sys = new Float64Array(z), first = new Int32Array(z);
+    const la0 = new Float64Array(z).fill(90), la1 = new Float64Array(z).fill(-90), lo0 = new Float64Array(z).fill(180), lo1 = new Float64Array(z).fill(-180);
+    for (let k = 0; k < n; k++) {
+      const i = idx[k], lo = LON[i], la = LAT[i];
+      if (lo < W || lo > E || la < S || la > N) continue;
+      const x = (lo - W) * sx, y = (yT - MY[i]) * sy;
+      const j = Math.min(rows - 1, (y / cell) | 0) * cols + Math.min(cols - 1, (x / cell) | 0);
+      if (cnt[j]++ === 0) first[j] = i;
+      sxs[j] += x; sys[j] += y;
+      if (la < la0[j]) la0[j] = la; if (la > la1[j]) la1[j] = la;
+      if (lo < lo0[j]) lo0[j] = lo; if (lo > lo1[j]) lo1[j] = lo;
+    }
+    g.font = 'bold 12px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    for (let j = 0; j < z; j++) {
+      const k = cnt[j]; if (!k) continue;
+      const x = sxs[j] / k, y = sys[j] / k;
+      if (k === 1) { dot(x, y, first[j]); continue; }
+      const r = Math.min(26, 11 + Math.log10(k) * 5);
+      g.beginPath(); g.arc(x, y, r, 0, 6.2832);
+      g.fillStyle = 'rgba(11,114,133,.88)'; g.fill();
+      g.lineWidth = 2; g.strokeStyle = '#fff'; g.stroke();
+      g.fillStyle = '#fff';
+      g.fillText(k >= 1000 ? (k / 1000).toFixed(k >= 10000 ? 0 : 1) + 'k' : String(k), x, y);
+      this.bins.push({ x, y, r, la0: la0[j], la1: la1[j], lo0: lo0[j], lo1: lo1[j] });
+    }
+  },
+  _hit(p) {
+    for (const b of this.bins) if (Math.hypot(p.x - b.x, p.y - b.y) <= b.r) return { bin: b };
+    const near = []; let la = 0, lo = 0;
+    for (const t of this.pts) if (Math.hypot(p.x - t.x, p.y - t.y) <= RAD + 4) { near.push(t.i); la = LAT[t.i]; lo = LON[t.i]; }
+    return near.length ? { list: near, la, lo } : null;
+  },
+  _hover(e) { this._m.getContainer().style.cursor = this._hit(e.containerPoint) ? 'pointer' : ''; },
+  _click(e) {
+    const h = this._hit(e.containerPoint); if (!h) return;
+    const m = this._m;
+    if (h.bin) {
+      const b = h.bin;
+      if (b.la1 - b.la0 < 1e-6 && b.lo1 - b.lo0 < 1e-6) m.setView([b.la0, b.lo0], Math.min(m.getZoom() + 3, 19));
+      else m.fitBounds([[b.la0, b.lo0], [b.la1, b.lo1]], { padding: [30, 30], maxZoom: 19 });
+    } else showPopup(h.list, h.la, h.lo);
+  }
+});
+const layer = new PtLayer().addTo(map);
+
+$('#size').oninput = e => { RAD = +e.target.value; layer.redraw(); };
+
+/* ---------- 파일 불러오기 ---------- */
+const drop = $('#drop'), fileIn = $('#file');
+fileIn.onchange = () => { if (fileIn.files[0]) handleFile(fileIn.files[0]); fileIn.value = ''; };
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileIn.click(); } });
+['dragover', 'drop'].forEach(t => window.addEventListener(t, e => { if (!drop.contains(e.target)) e.preventDefault(); }));
+
+function restoreStat() { nm.length ? render(false) : setStat('CSV 파일을 불러와 주세요.'); }
+
+async function handleFile(file) {
+  if (!/\.csv$/i.test(file.name)) { toast(FORMAT_ERR, 'error'); return; }
+  if (busy) { toast('파일을 읽는 중입니다. 잠시만 기다려 주세요.', 'info', 2500); return; }
+  busy = true;
+  setStat('<b>' + esc(file.name) + '</b> 읽는 중…');
+  let text;
+  try {
+    const buf = await file.arrayBuffer();
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }   // UTF-8 우선
+    catch (e) { text = new TextDecoder('euc-kr').decode(buf); }               // 실패 시 CP949(EUC-KR)
+  } catch (e) { busy = false; toast('파일을 읽을 수 없습니다. 다시 시도해 주세요.', 'error'); restoreStat(); return; }
+  if (!text.trim()) { busy = false; toast('파일이 비어 있습니다. ' + FORMAT_ERR, 'error'); restoreStat(); return; }
+
+  let T, finished = false;
+  const fresh = () => { T = { nm: [], br: [], rd: [], sk: [], ob: [], la: [], lo: [], bad: 0, col: null, fields: null, fail: null }; };
+  const onChunk = res => {
+    if (T.fail) return;
+    if (!T.col) {
+      const f = (res.meta && res.meta.fields) || [];
+      if (f.length < 2) { T.fail = { fmt: 1 }; return; }
+      const col = {}, miss = [];
+      for (const k in REQ) { const h = f.find(x => REQ[k].includes(x.toLowerCase())); h ? col[k] = h : miss.push(k); }
+      if (miss.length) { T.fail = { miss }; return; }
+      T.col = col; T.fields = f;
+    }
+    const col = T.col, f = T.fields, d = res.data;
+    for (let k = 0; k < d.length; k++) {
+      const o = d[k];
+      const lat = parseFloat(o[col['위도']]), lon = parseFloat(o[col['경도']]);
+      const ok = isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 85 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
+      if (!ok) T.bad++;
+      const n = (o[col['상호명']] || '').trim(), b = (o[col['지점명']] || '').trim(), r = (o[col['도로명']] || '').trim();
+      T.nm.push(n); T.br.push(b); T.rd.push(r);
+      T.sk.push((n + ' ' + b + ' ' + r).toLowerCase());
+      T.la.push(ok ? lat : NaN); T.lo.push(ok ? lon : NaN);
+      T.ob.push(f.map(h => o[h] == null ? '' : o[h]).join(SEP));
+    }
+    setStat('<b>' + esc(file.name) + '</b> 읽는 중… ' + T.nm.length.toLocaleString() + '건');
+  };
+  const done = () => { if (finished) return; finished = true; finish(T, file.name); };
+  const run = worker => {
+    fresh();
+    Papa.parse(text, {
+      header: true, skipEmptyLines: 'greedy', worker: worker, chunkSize: 4 * 1024 * 1024,
+      transformHeader: h => h.replace(/^\uFEFF/, '').trim(),
+      chunk: onChunk, complete: done,
+      error: () => { if (worker) run(false); else { T.fail = { fmt: 1 }; done(); } }
+    });
+  };
+  run(true);
+}
+
+function finish(T, name) {
+  busy = false;
+  if (T.fail) {
+    if (T.fail.miss) toast('필수 컬럼이 없습니다: ' + T.fail.miss.join(', ') + ' — 해당 부분의 데이터가 존재하지 않아 서비스를 제공할 수 없습니다.', 'error', 9000);
+    else toast(FORMAT_ERR, 'error');
+    restoreStat(); return;
+  }
+  const n = T.nm.length;
+  if (!T.col || !n) { toast(FORMAT_ERR, 'error'); restoreStat(); return; }
+  if (T.bad === n) { toast('모든 행의 좌표값이 비어 있거나 올바르지 않아 지도에 표시할 수 없습니다.', 'error', 9000); restoreStat(); return; }
+  nm = T.nm; br = T.br; rd = T.rd; sk = T.sk; ob = T.ob; FIELDS = T.fields; FILE = name;
+  LAT = Float64Array.from(T.la); LON = Float64Array.from(T.lo);
+  MY = new Float64Array(n);
+  for (let i = 0; i < n; i++) MY[i] = isNaN(LAT[i]) ? NaN : mer(LAT[i]);
+  $('#q').disabled = false; $('#q').value = ''; $('#q').focus();
+  if (T.bad) toast('일부 값에 좌표값이 누락되었습니다. (' + T.bad.toLocaleString() + '건은 지도에 표시되지 않고 목록에만 나타납니다)', 'warn', 9000);
+  else toast(n.toLocaleString() + '건을 불러왔습니다.', 'info', 3500);
+  render(true);
+}
+
+/* ---------- 검색 · 표시 ---------- */
+$('#q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => render(true), 250); });
+
+function render(fit) {
+  const toks = $('#q').value.toLowerCase().split(/\s+/).filter(Boolean);
+  const n = nm.length, tmp = new Int32Array(n);
+  let c = 0;
+  if (!toks.length) { for (let i = 0; i < n; i++) tmp[i] = i; c = n; }
+  else if (toks.length === 1) { const t = toks[0]; for (let i = 0; i < n; i++) if (sk[i].indexOf(t) !== -1) tmp[c++] = i; }
+  else for (let i = 0; i < n; i++) { const s = sk[i]; let ok = true; for (let k = 0; k < toks.length; k++) if (s.indexOf(toks[k]) === -1) { ok = false; break; } if (ok) tmp[c++] = i; }
+  RES = tmp.subarray(0, c);
+
+  /* 좌표가 있는 결과만 지도로 */
+  const geo = new Int32Array(c); let gc = 0, a = 90, b = -90, w = 180, e = -180;
+  for (let k = 0; k < c; k++) {
+    const i = RES[k], la = LAT[i]; if (la !== la) continue;
+    geo[gc++] = i; const lo = LON[i];
+    if (la < a) a = la; if (la > b) b = la; if (lo < w) w = lo; if (lo > e) e = lo;
+  }
+  layer.setData(geo.subarray(0, gc));
+  if (fit && gc) map.fitBounds([[a, w], [b, e]], { padding: [40, 40], maxZoom: 17 });   // 검색 결과에 맞춰 지도 범위 자동 조정
+
+  shown = STEP; renderList(); 
+  let s = '<b>' + esc(FILE) + '</b> · 전체 ' + n.toLocaleString() + '건 · 검색 결과 <b>' + c.toLocaleString() + '건</b>';
+  if (c - gc) s += ' · 좌표 누락 ' + (c - gc).toLocaleString() + '건';
+  if (!c) s = '<b>' + esc(FILE) + '</b> · 검색 결과가 존재하지 않습니다.';
+  setStat(s);
+  $('#dlGeo').disabled = $('#dlCsv').disabled = !c;
+}
+
+function renderList() {
+  const ul = $('#list'), c = RES.length;
+  if (!c) { ul.innerHTML = '<li class="empty">검색 결과가 존재하지 않습니다.<br>다른 검색어를 입력해 보세요.</li>'; return; }
+  const m = Math.min(c, shown); let h = '';
+  for (let k = 0; k < m; k++) {
+    const i = RES[k];
+    h += '<li data-i="' + i + '"><span class="nm">' + esc(nm[i]) + '</span>' + (br[i] ? '<span class="br">' + esc(br[i]) + '</span>' : '') +
+         (LAT[i] !== LAT[i] ? '<span class="nc">좌표 없음</span>' : '') + '<div class="ad">' + esc(rd[i]) + '</div></li>';
+  }
+  if (c > m) h += '<li class="more">더 보기 (남은 ' + (c - m).toLocaleString() + '건)</li>';
+  const top = shown === STEP ? 0 : ul.scrollTop;
+  ul.innerHTML = h; ul.scrollTop = top;
+}
+
+$('#list').addEventListener('click', e => {
+  const li = e.target.closest('li'); if (!li) return;
+  if (li.classList.contains('more')) { shown += STEP; renderList(); return; }
+  if (!li.dataset.i) return;
+  const i = +li.dataset.i;
+  if (LAT[i] !== LAT[i]) { toast('이 업소는 좌표값이 없어 지도에 표시할 수 없습니다.', 'warn', 4000); return; }
+  map.setView([LAT[i], LON[i]], Math.max(map.getZoom(), 16));
+  showPopup([i], LAT[i], LON[i]);
+  if (matchMedia('(max-width:760px)').matches) $('#map').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
+
+/* ---------- 저장 (검색된 데이터만) ---------- */
+function save(name, mime, content) {
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+function later(fn) { toast('저장 파일을 만드는 중입니다…', 'info', 2500); setTimeout(fn, 40); }
+$('#dlCsv').onclick = () => later(() => {
+  if (!RES.length) { toast('저장할 검색 결과가 존재하지 않습니다.', 'warn'); return; }
+  const data = new Array(RES.length);
+  for (let k = 0; k < RES.length; k++) data[k] = ob[RES[k]].split(SEP);
+  save('상가업소_검색결과.csv', 'text/csv;charset=utf-8', '\uFEFF' + Papa.unparse({ fields: FIELDS, data: data }));   // BOM: 엑셀 한글 깨짐 방지
+});
+$('#dlGeo').onclick = () => later(() => {
+  const f = [];
+  for (let k = 0; k < RES.length; k++) {
+    const i = RES[k]; if (LAT[i] !== LAT[i]) continue;
+    const v = ob[i].split(SEP), p = {};
+    for (let q = 0; q < FIELDS.length; q++) p[FIELDS[q]] = v[q];
+    f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [LON[i], LAT[i]] }, properties: p });
+  }
+  if (!f.length) { toast('좌표가 있는 검색 결과가 없어 GeoJSON을 만들 수 없습니다.', 'warn'); return; }
+  save('상가업소_검색결과.geojson', 'application/geo+json', JSON.stringify({ type: 'FeatureCollection', features: f }));
+});
+</script>
+</body>
+</html>
