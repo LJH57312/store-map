@@ -5,7 +5,7 @@
 
 ## 바로 사용하기
 
-**[https://내사용자이름.github.io/저장소이름/](https://ljh57312.github.io/store-map/)**
+**(https://ljh57312.github.io/store-map/)**
 
 > 위 주소는 예시입니다. 저장소 주인은 실제 주소로 바꿔 주세요. (방법은 `GitHub_배포가이드.md` 참고)
 
