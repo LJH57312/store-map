@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- 보안: connect-src 'none' → fetch/XHR/WebSocket 전송 차단. CSV가 서버로 나갈 수 없는 구조입니다. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src https: data: blob:; worker-src blob:; connect-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src https: data: blob:; connect-src 'none'">
 <title>상가업소 검색 지도</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
 <style>
@@ -89,12 +89,12 @@ details h4{margin:10px 0 2px;font-size:12.5px}details ul{margin:0;padding-left:1
    <h4>지도 라이브러리와 베이스맵의 차이</h4>
    <ul>
     <li>라이브러리(Leaflet): 지도 화면과 확대/축소, 마커를 다루는 프로그램입니다.</li>
-    <li>베이스맵(타일): 배경이 되는 지도 이미지 조각입니다. OSM, CARTO, Esri 등이 무료로 공개합니다.</li>
+    <li>베이스맵(타일): 배경이 되는 지도 이미지 조각입니다. OpenStreetMap, Esri 등이 무료로 공개합니다.</li>
     <li>Leaflet이 고른 베이스맵 타일을 불러오고 그 위에 검색된 업소를 그립니다. 일부 타일 서버가 막혀도 자동으로 Esri 도로 지도로 전환합니다.</li>
    </ul>
    <h4>대용량 CSV 성능</h4>
    <ul>
-    <li>파일 해석은 백그라운드 스레드(Web Worker)에서 조각 단위로 처리하고, 필요한 값만 메모리에 보관합니다.</li>
+    <li>파일을 통째로 올리지 않고 조각 단위로 읽으며(진행률 표시), 필요한 값만 메모리에 보관합니다.</li>
     <li>마커는 개별 객체를 만들지 않고 캔버스 한 장에 직접 그립니다. 화면에 보이는 업소가 많으면 격자로 묶어 개수만 표시하고, 누르면 확대됩니다.</li>
     <li>검색은 입력 후 0.25초 뒤에 실행하며, 목록은 200건씩 나눠 보여줍니다.</li>
    </ul>
@@ -110,7 +110,6 @@ details h4{margin:10px 0 2px;font-size:12.5px}details ul{margin:0;padding-left:1
 <div id="toasts"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -126,10 +125,14 @@ const STEP = 200, LIM = 3000;
 const FORMAT_ERR = '파일 형식이 달라 값을 제공할 수 없습니다. 쉼표(,)로 구분된 CSV 파일을 선택해 주세요.';
 const mer = la => Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360));
 
-/* 데이터는 필요한 값만 배열/타입배열로 보관 (객체 수십만 개를 만들지 않음) */
-let nm = [], br = [], rd = [], sk = [], ob = [];
+/* 데이터는 행마다 '원본 한 줄(ob)'과 '검색용 문자열(sk)'만 보관하고 좌표는 타입배열에 둡니다. */
+let ob = [], sk = [], CI = null, FIELDS = [], FILE = '';
 let LAT = new Float64Array(0), LON = LAT, MY = LAT;
-let FIELDS = [], FILE = '', RES = new Int32Array(0), shown = STEP, RAD = 7, timer = 0, seq = 0, busy = false;
+let RES = new Int32Array(0), shown = STEP, RAD = 7, timer = 0, busy = false;
+const info = i => {
+  const v = ob[i].split(SEP);
+  return { n: (v[CI.n] || '').trim(), b: (v[CI.b] || '').trim(), r: (v[CI.d] || '').trim() };
+};
 
 /* ---------- 알림(상단 작은 창) ---------- */
 function toast(msg, type, ms) {
@@ -142,21 +145,24 @@ function toast(msg, type, ms) {
   setTimeout(rm, ms || 7000);
 }
 function setStat(h) { $('#stat').innerHTML = h; }
+window.addEventListener('error', e => toast('오류가 발생했습니다: ' + (e.message || '알 수 없는 오류'), 'error', 9000));
+window.addEventListener('unhandledrejection', e => toast('오류가 발생했습니다: ' + ((e.reason && e.reason.message) || e.reason), 'error', 9000));
 
-/* ---------- 지도 + 배경지도 ---------- */
+/* ---------- 지도 + 배경지도 (API 키가 필요 없는 타일만 사용) ---------- */
 const map = L.map('map').setView([36.5, 127.8], 7);
 const tl = (u, o) => L.tileLayer(u, Object.assign({ maxZoom: 19 }, o));
+const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
 const BASES = {
   '일반 지도 (OpenStreetMap)': tl('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }),
-  '밝은 단순 지도 (CARTO)': tl('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', attribution: '© OpenStreetMap contributors © CARTO' }),
-  '위성 사진 (Esri)': tl('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' })
+  '밝은 단순 지도 (Esri)': tl(ESRI + 'Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxNativeZoom: 16, attribution: 'Tiles © Esri' }),
+  '위성 사진 (Esri)': tl(ESRI + 'World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxNativeZoom: 18, attribution: 'Tiles © Esri' })
 };
-/* 예비 지도: 선택한 배경지도 타일이 전부 막히면 자동 전환 */
-const FALLBACK = tl('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' });
+/* 예비 지도: 선택한 배경지도 타일이 계속 실패하면 자동 전환 */
+const FALLBACK = tl(ESRI + 'World_Street_Map/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' });
 
 const sel = $('#base');
 Object.keys(BASES).forEach(k => sel.add(new Option(k, k)));
-sel.selectedIndex = 1;   // 기본: 가볍고 밝은 CARTO
+sel.selectedIndex = 1;   // 기본: 밝은 단순 지도
 
 let cur = null, loaded = 0, errs = 0, usedFb = false;
 Object.values(BASES).concat([FALLBACK]).forEach(l => {
@@ -165,7 +171,7 @@ Object.values(BASES).concat([FALLBACK]).forEach(l => {
     errs++;
     if (l !== FALLBACK && !usedFb && loaded === 0 && errs >= 4) {
       usedFb = true;
-      toast('선택한 배경지도를 불러오지 못해 Esri 도로 지도로 자동 전환했습니다. (일부 지도 서버는 file:// 로 열면 차단됩니다. http://localhost 로 열어 보세요.)', 'warn', 10000);
+      toast('선택한 배경지도를 불러오지 못해 Esri 도로 지도로 자동 전환했습니다.', 'warn', 8000);
       setBase(FALLBACK);
     }
   });
@@ -182,9 +188,9 @@ function popupHtml(list) {
   let h = '<div class="pl">';
   const n = Math.min(list.length, 8);
   for (let k = 0; k < n; k++) {
-    const i = list[k];
-    h += '<div class="pi"><div class="pn">' + esc(nm[i]) + (br[i] ? '<span class="pb">' + esc(br[i]) + '</span>' : '') +
-         '</div><div class="pa">' + esc(rd[i]) + '</div></div>';
+    const d = info(list[k]);
+    h += '<div class="pi"><div class="pn">' + esc(d.n) + (d.b ? '<span class="pb">' + esc(d.b) + '</span>' : '') +
+         '</div><div class="pa">' + esc(d.r) + '</div></div>';
   }
   if (list.length > n) h += '<div class="pa" style="margin-top:8px">같은 위치에 ' + (list.length - n) + '곳 더 있습니다.</div>';
   return h + '</div>';
@@ -285,8 +291,62 @@ const PtLayer = L.Layer.extend({
   }
 });
 const layer = new PtLayer().addTo(map);
-
 $('#size').oninput = e => { RAD = +e.target.value; layer.redraw(); };
+
+/*PARSER-BEGIN*/
+/* 직접 만든 스트리밍 CSV 해석기: 따옴표·줄바꿈·"" 이스케이프를 지원하고, 조각(chunk)으로 나눠 받아도 이어서 처리합니다. */
+function makeParser(D, onRow) {
+  let row = [], field = '', inQ = false, qEnd = false;
+  return {
+    feed(s) {
+      const n = s.length; let seg = 0;
+      for (let i = 0; i < n; i++) {
+        const c = s.charCodeAt(i);
+        if (inQ) {
+          if (c === 34) { field += s.slice(seg, i); inQ = false; qEnd = true; seg = i + 1; }
+          continue;
+        }
+        if (qEnd) {
+          if (c === 34) { field += '"'; inQ = true; qEnd = false; seg = i + 1; continue; }
+          qEnd = false;
+        }
+        if (c === D) { row.push(field + s.slice(seg, i)); field = ''; seg = i + 1; }
+        else if (c === 10 || c === 13) { row.push(field + s.slice(seg, i)); onRow(row); row = []; field = ''; seg = i + 1; }
+        else if (c === 34 && i === seg && field === '') { inQ = true; seg = i + 1; }
+      }
+      field += s.slice(seg);
+    },
+    end() {
+      if (inQ || qEnd || field !== '' || row.length) { row.push(field); onRow(row); }
+      row = []; field = ''; inQ = false; qEnd = false;
+    }
+  };
+}
+/* 한 줄씩 받아서 필수 컬럼 확인 + 좌표 검사 + 필요한 값만 보관 */
+function newCollector() {
+  const T = { ob: [], sk: [], la: [], lo: [], bad: 0, hdr: null, ci: null, fail: null };
+  T.onRow = r => {
+    if (T.fail || (r.length === 1 && r[0] === '')) return;
+    if (!T.hdr) {
+      const f = r.map(h => h.replace(/^\uFEFF/, '').trim());
+      if (f.length < 2) { T.fail = { fmt: 1 }; return; }
+      const ci = {}, miss = [];
+      for (const k in REQ) { const j = f.findIndex(x => REQ[k].indexOf(x.toLowerCase()) !== -1); j < 0 ? miss.push(k) : ci[k] = j; }
+      if (miss.length) { T.fail = { miss }; return; }
+      T.hdr = f; T.ci = ci; return;
+    }
+    const ci = T.ci;
+    const lat = parseFloat(r[ci['위도']]), lon = parseFloat(r[ci['경도']]);
+    const ok = isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 85 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
+    if (!ok) T.bad++;
+    const n = (r[ci['상호명']] || '').trim(), b = (r[ci['지점명']] || '').trim(), d = (r[ci['도로명']] || '').trim();
+    T.sk.push((n + ' ' + b + ' ' + d).toLowerCase());
+    T.la.push(ok ? lat : NaN); T.lo.push(ok ? lon : NaN);
+    T.ob.push(r.join(SEP));
+  };
+  return T;
+}
+/*PARSER-END*/
 
 /* ---------- 파일 불러오기 ---------- */
 const drop = $('#drop'), fileIn = $('#file');
@@ -297,74 +357,61 @@ drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) handleFile(e.d
 drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileIn.click(); } });
 ['dragover', 'drop'].forEach(t => window.addEventListener(t, e => { if (!drop.contains(e.target)) e.preventDefault(); }));
 
-function restoreStat() { nm.length ? render(false) : setStat('CSV 파일을 불러와 주세요.'); }
+function restoreStat() { ob.length ? render(false) : setStat('CSV 파일을 불러와 주세요.'); }
+const tick = () => new Promise(r => setTimeout(r, 0));
 
 async function handleFile(file) {
   if (!/\.csv$/i.test(file.name)) { toast(FORMAT_ERR, 'error'); return; }
   if (busy) { toast('파일을 읽는 중입니다. 잠시만 기다려 주세요.', 'info', 2500); return; }
   busy = true;
   setStat('<b>' + esc(file.name) + '</b> 읽는 중…');
-  let text;
   try {
-    const buf = await file.arrayBuffer();
-    try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }   // UTF-8 우선
-    catch (e) { text = new TextDecoder('euc-kr').decode(buf); }               // 실패 시 CP949(EUC-KR)
-  } catch (e) { busy = false; toast('파일을 읽을 수 없습니다. 다시 시도해 주세요.', 'error'); restoreStat(); return; }
-  if (!text.trim()) { busy = false; toast('파일이 비어 있습니다. ' + FORMAT_ERR, 'error'); restoreStat(); return; }
+    /* 1) 앞부분을 보고 인코딩(UTF-8 / EUC-KR)과 구분자를 판별 */
+    const head = new Uint8Array(await file.slice(0, 262144).arrayBuffer());
+    if (!head.length) { toast('파일이 비어 있습니다. ' + FORMAT_ERR, 'error'); restoreStat(); return; }
+    let enc = 'utf-8', sample;
+    try { sample = new TextDecoder('utf-8', { fatal: true }).decode(head, { stream: true }); }
+    catch (e) { enc = 'euc-kr'; sample = new TextDecoder('euc-kr').decode(head); }
+    const first = sample.split(/\r?\n/, 1)[0];
+    let delim = ',', best = -1;
+    for (const d of [',', '\t', ';', '|']) { const k = first.split(d).length - 1; if (k > best) { best = k; delim = d; } }
 
-  let T, finished = false;
-  const fresh = () => { T = { nm: [], br: [], rd: [], sk: [], ob: [], la: [], lo: [], bad: 0, col: null, fields: null, fail: null }; };
-  const onChunk = res => {
-    if (T.fail) return;
-    if (!T.col) {
-      const f = (res.meta && res.meta.fields) || [];
-      if (f.length < 2) { T.fail = { fmt: 1 }; return; }
-      const col = {}, miss = [];
-      for (const k in REQ) { const h = f.find(x => REQ[k].includes(x.toLowerCase())); h ? col[k] = h : miss.push(k); }
-      if (miss.length) { T.fail = { miss }; return; }
-      T.col = col; T.fields = f;
+    /* 2) 파일을 조각 단위로 읽으며 해석 (화면이 멈추지 않도록 주기적으로 쉬어 주고 진행률 표시) */
+    const T = newCollector(), p = makeParser(delim.charCodeAt(0), T.onRow), dec = new TextDecoder(enc);
+    const reader = (file.stream ? file.stream() : new Response(file).body).getReader();
+    let bytes = 0, last = performance.now();
+    for (;;) {
+      const r = await reader.read(); if (r.done) break;
+      bytes += r.value.length;
+      p.feed(dec.decode(r.value, { stream: true }));
+      if (T.fail) { reader.cancel(); break; }
+      if (performance.now() - last > 120) {
+        setStat('<b>' + esc(file.name) + '</b> 읽는 중… ' + Math.min(99, Math.floor(bytes / file.size * 100)) + '% · ' + T.ob.length.toLocaleString() + '건');
+        await tick(); last = performance.now();
+      }
     }
-    const col = T.col, f = T.fields, d = res.data;
-    for (let k = 0; k < d.length; k++) {
-      const o = d[k];
-      const lat = parseFloat(o[col['위도']]), lon = parseFloat(o[col['경도']]);
-      const ok = isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 85 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
-      if (!ok) T.bad++;
-      const n = (o[col['상호명']] || '').trim(), b = (o[col['지점명']] || '').trim(), r = (o[col['도로명']] || '').trim();
-      T.nm.push(n); T.br.push(b); T.rd.push(r);
-      T.sk.push((n + ' ' + b + ' ' + r).toLowerCase());
-      T.la.push(ok ? lat : NaN); T.lo.push(ok ? lon : NaN);
-      T.ob.push(f.map(h => o[h] == null ? '' : o[h]).join(SEP));
-    }
-    setStat('<b>' + esc(file.name) + '</b> 읽는 중… ' + T.nm.length.toLocaleString() + '건');
-  };
-  const done = () => { if (finished) return; finished = true; finish(T, file.name); };
-  const run = worker => {
-    fresh();
-    Papa.parse(text, {
-      header: true, skipEmptyLines: 'greedy', worker: worker, chunkSize: 4 * 1024 * 1024,
-      transformHeader: h => h.replace(/^\uFEFF/, '').trim(),
-      chunk: onChunk, complete: done,
-      error: () => { if (worker) run(false); else { T.fail = { fmt: 1 }; done(); } }
-    });
-  };
-  run(true);
+    if (!T.fail) { p.feed(dec.decode()); p.end(); }
+    finish(T, file.name);
+  } catch (err) {
+    toast('파일을 읽는 중 오류가 발생했습니다: ' + ((err && err.message) || err), 'error', 9000);
+    restoreStat();
+  } finally { busy = false; }
 }
 
 function finish(T, name) {
-  busy = false;
   if (T.fail) {
     if (T.fail.miss) toast('필수 컬럼이 없습니다: ' + T.fail.miss.join(', ') + ' — 해당 부분의 데이터가 존재하지 않아 서비스를 제공할 수 없습니다.', 'error', 9000);
     else toast(FORMAT_ERR, 'error');
     restoreStat(); return;
   }
-  const n = T.nm.length;
-  if (!T.col || !n) { toast(FORMAT_ERR, 'error'); restoreStat(); return; }
+  const n = T.ob.length;
+  if (!T.hdr || !n) { toast(FORMAT_ERR, 'error'); restoreStat(); return; }
   if (T.bad === n) { toast('모든 행의 좌표값이 비어 있거나 올바르지 않아 지도에 표시할 수 없습니다.', 'error', 9000); restoreStat(); return; }
-  nm = T.nm; br = T.br; rd = T.rd; sk = T.sk; ob = T.ob; FIELDS = T.fields; FILE = name;
+  ob = T.ob; sk = T.sk; FIELDS = T.hdr; FILE = name;
+  CI = { n: T.ci['상호명'], b: T.ci['지점명'], d: T.ci['도로명'] };
   LAT = Float64Array.from(T.la); LON = Float64Array.from(T.lo);
   MY = new Float64Array(n);
-  for (let i = 0; i < n; i++) MY[i] = isNaN(LAT[i]) ? NaN : mer(LAT[i]);
+  for (let i = 0; i < n; i++) MY[i] = LAT[i] !== LAT[i] ? NaN : mer(LAT[i]);
   $('#q').disabled = false; $('#q').value = ''; $('#q').focus();
   if (T.bad) toast('일부 값에 좌표값이 누락되었습니다. (' + T.bad.toLocaleString() + '건은 지도에 표시되지 않고 목록에만 나타납니다)', 'warn', 9000);
   else toast(n.toLocaleString() + '건을 불러왔습니다.', 'info', 3500);
@@ -376,7 +423,7 @@ $('#q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeou
 
 function render(fit) {
   const toks = $('#q').value.toLowerCase().split(/\s+/).filter(Boolean);
-  const n = nm.length, tmp = new Int32Array(n);
+  const n = ob.length, tmp = new Int32Array(n);
   let c = 0;
   if (!toks.length) { for (let i = 0; i < n; i++) tmp[i] = i; c = n; }
   else if (toks.length === 1) { const t = toks[0]; for (let i = 0; i < n; i++) if (sk[i].indexOf(t) !== -1) tmp[c++] = i; }
@@ -393,7 +440,7 @@ function render(fit) {
   layer.setData(geo.subarray(0, gc));
   if (fit && gc) map.fitBounds([[a, w], [b, e]], { padding: [40, 40], maxZoom: 17 });   // 검색 결과에 맞춰 지도 범위 자동 조정
 
-  shown = STEP; renderList(); 
+  shown = STEP; renderList();
   let s = '<b>' + esc(FILE) + '</b> · 전체 ' + n.toLocaleString() + '건 · 검색 결과 <b>' + c.toLocaleString() + '건</b>';
   if (c - gc) s += ' · 좌표 누락 ' + (c - gc).toLocaleString() + '건';
   if (!c) s = '<b>' + esc(FILE) + '</b> · 검색 결과가 존재하지 않습니다.';
@@ -406,9 +453,9 @@ function renderList() {
   if (!c) { ul.innerHTML = '<li class="empty">검색 결과가 존재하지 않습니다.<br>다른 검색어를 입력해 보세요.</li>'; return; }
   const m = Math.min(c, shown); let h = '';
   for (let k = 0; k < m; k++) {
-    const i = RES[k];
-    h += '<li data-i="' + i + '"><span class="nm">' + esc(nm[i]) + '</span>' + (br[i] ? '<span class="br">' + esc(br[i]) + '</span>' : '') +
-         (LAT[i] !== LAT[i] ? '<span class="nc">좌표 없음</span>' : '') + '<div class="ad">' + esc(rd[i]) + '</div></li>';
+    const i = RES[k], d = info(i);
+    h += '<li data-i="' + i + '"><span class="nm">' + esc(d.n) + '</span>' + (d.b ? '<span class="br">' + esc(d.b) + '</span>' : '') +
+         (LAT[i] !== LAT[i] ? '<span class="nc">좌표 없음</span>' : '') + '<div class="ad">' + esc(d.r) + '</div></li>';
   }
   if (c > m) h += '<li class="more">더 보기 (남은 ' + (c - m).toLocaleString() + '건)</li>';
   const top = shown === STEP ? 0 : ul.scrollTop;
@@ -434,18 +481,22 @@ function save(name, mime, content) {
   setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
 function later(fn) { toast('저장 파일을 만드는 중입니다…', 'info', 2500); setTimeout(fn, 40); }
+const csvq = v => /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
 $('#dlCsv').onclick = () => later(() => {
   if (!RES.length) { toast('저장할 검색 결과가 존재하지 않습니다.', 'warn'); return; }
-  const data = new Array(RES.length);
-  for (let k = 0; k < RES.length; k++) data[k] = ob[RES[k]].split(SEP);
-  save('상가업소_검색결과.csv', 'text/csv;charset=utf-8', '\uFEFF' + Papa.unparse({ fields: FIELDS, data: data }));   // BOM: 엑셀 한글 깨짐 방지
+  const lines = [FIELDS.map(csvq).join(',')];
+  for (let k = 0; k < RES.length; k++) {
+    const v = ob[RES[k]].split(SEP);
+    lines.push(FIELDS.map((_, j) => csvq(v[j] == null ? '' : v[j])).join(','));
+  }
+  save('상가업소_검색결과.csv', 'text/csv;charset=utf-8', '\uFEFF' + lines.join('\r\n'));   // BOM: 엑셀 한글 깨짐 방지
 });
 $('#dlGeo').onclick = () => later(() => {
   const f = [];
   for (let k = 0; k < RES.length; k++) {
     const i = RES[k]; if (LAT[i] !== LAT[i]) continue;
     const v = ob[i].split(SEP), p = {};
-    for (let q = 0; q < FIELDS.length; q++) p[FIELDS[q]] = v[q];
+    for (let q = 0; q < FIELDS.length; q++) p[FIELDS[q]] = v[q] == null ? '' : v[q];
     f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [LON[i], LAT[i]] }, properties: p });
   }
   if (!f.length) { toast('좌표가 있는 검색 결과가 없어 GeoJSON을 만들 수 없습니다.', 'warn'); return; }
